@@ -61,6 +61,41 @@ go run ./cmd/meitu-layering-proxy
 curl http://localhost:8080/healthz
 ```
 
+## Docker 部署
+
+本地构建镜像：
+
+```bash
+docker build -t meitu-layering-proxy:local .
+```
+
+本地运行：
+
+```bash
+docker run --rm -p 8080:8080 \
+  -e MEITU_PROXY_API_KEY='replace-with-a-random-token' \
+  -e MEITU_CREDENTIALS_JSON='[{"name":"account-1","app_key":"your-app-key","secret_id":"your-secret-id","max_concurrency":1}]' \
+  ghcr.io/98624017/meitu-layering-proxy:latest
+```
+
+也可以用本地镜像名替换最后一行：
+
+```bash
+meitu-layering-proxy:local
+```
+
+GitHub Actions 会在以下场景构建 Docker 镜像：
+
+- Pull Request：只构建验证，不推送镜像。
+- 推送到 `main`：推送 `latest`、`main` 和 `sha-<commit>` 标签到 GHCR。
+- 推送 `v*.*.*` tag：推送对应版本标签和 `sha-<commit>` 标签。
+
+镜像地址：
+
+```text
+ghcr.io/98624017/meitu-layering-proxy
+```
+
 ## API
 
 ### 创建分层任务
