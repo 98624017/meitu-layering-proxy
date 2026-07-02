@@ -1,0 +1,21 @@
+# Go build output
+bin/
+dist/
+*.exe
+*.test
+*.out
+coverage.txt
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store
+
+# Temporary files
+tmp/
+*.log
