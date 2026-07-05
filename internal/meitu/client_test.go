@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -152,6 +153,86 @@ func TestClientStatusInvalidProjectJSON(t *testing.T) {
 	}
 	if !IsProjectJSONParseError(err) {
 		t.Fatalf("error = %T %v, want ProjectJSONParseError", err, err)
+	}
+}
+
+func TestClientStatusErrorUsesUpstreamMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code":       0,
+			"error_code": 30001,
+			"error_msg":  "图片下载失败",
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, server.Client())
+	_, err := client.Status(context.Background(), credentials.Credential{Name: "acc1", AppKey: "ak", SecretID: "sk"}, "mt-task")
+	if err == nil {
+		t.Fatal("Status succeeded, want upstream error")
+	}
+	var upstreamErr *UpstreamError
+	if !errors.As(err, &upstreamErr) {
+		t.Fatalf("error = %T %v, want UpstreamError", err, err)
+	}
+	if upstreamErr.Code != "error_code_30001" {
+		t.Fatalf("code = %s, want error_code_30001", upstreamErr.Code)
+	}
+	if upstreamErr.Message != "图片下载失败" {
+		t.Fatalf("message = %q, want 图片下载失败", upstreamErr.Message)
+	}
+}
+
+func TestClientStatusStringErrorWithoutNumericCodeFails(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        map[string]any
+		wantCode    string
+		wantMessage string
+	}{
+		{
+			name:        "error",
+			body:        map[string]any{"code": 0, "error_code": 0, "error": "upstream_busy"},
+			wantCode:    "upstream_busy",
+			wantMessage: "upstream_busy",
+		},
+		{
+			name:        "error_msg",
+			body:        map[string]any{"code": 0, "error_code": 0, "error_msg": "图片下载失败"},
+			wantCode:    "upstream_error",
+			wantMessage: "图片下载失败",
+		},
+		{
+			name:        "error_message",
+			body:        map[string]any{"code": 0, "error_code": 0, "error_message": "图片格式不支持"},
+			wantCode:    "upstream_error",
+			wantMessage: "图片格式不支持",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(tt.body)
+			}))
+			defer server.Close()
+
+			client := NewClient(server.URL, server.Client())
+			_, err := client.Status(context.Background(), credentials.Credential{Name: "acc1", AppKey: "ak", SecretID: "sk"}, "mt-task")
+			if err == nil {
+				t.Fatal("Status succeeded, want upstream error")
+			}
+			var upstreamErr *UpstreamError
+			if !errors.As(err, &upstreamErr) {
+				t.Fatalf("error = %T %v, want UpstreamError", err, err)
+			}
+			if upstreamErr.Code != tt.wantCode {
+				t.Fatalf("code = %s, want %s", upstreamErr.Code, tt.wantCode)
+			}
+			if upstreamErr.Message != tt.wantMessage {
+				t.Fatalf("message = %q, want %q", upstreamErr.Message, tt.wantMessage)
+			}
+		})
 	}
 }
 

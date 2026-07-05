@@ -71,19 +71,19 @@ func (c *Client) Submit(ctx context.Context, credential credentials.Credential, 
 		return SubmitResult{}, err
 	}
 	if statusCode < 200 || statusCode >= 300 {
-		return SubmitResult{}, NewUpstreamError(statusCode, "http_error", fmt.Sprintf("美图提交接口返回 HTTP %d", statusCode), responseBytes)
+		return SubmitResult{}, newHTTPUpstreamError(statusCode, "提交接口返回 HTTP %d", responseBytes)
 	}
 
 	var response submitResponse
 	if err := json.Unmarshal(responseBytes, &response); err != nil {
-		return SubmitResult{}, NewUpstreamError(statusCode, "invalid_response", "美图提交响应无法解析", responseBytes)
+		return SubmitResult{}, NewUpstreamError(statusCode, "invalid_response", "提交响应无法解析", responseBytes)
 	}
 	if response.Code != 0 {
-		return SubmitResult{}, NewUpstreamError(statusCode, response.NormalizedCode(), response.NormalizedMessage("美图提交失败"), responseBytes)
+		return SubmitResult{}, NewUpstreamError(statusCode, response.NormalizedCode(), response.NormalizedMessage("任务提交失败"), responseBytes)
 	}
 	upstreamTaskID := strings.TrimSpace(response.Data.Result.ID)
 	if upstreamTaskID == "" {
-		return SubmitResult{}, NewUpstreamError(statusCode, "missing_task_id", "美图提交响应缺少任务 ID", responseBytes)
+		return SubmitResult{}, NewUpstreamError(statusCode, "missing_task_id", "提交响应缺少任务 ID", responseBytes)
 	}
 
 	return SubmitResult{
@@ -111,15 +111,15 @@ func (c *Client) Status(ctx context.Context, credential credentials.Credential, 
 		return StatusResult{}, err
 	}
 	if statusCode < 200 || statusCode >= 300 {
-		return StatusResult{}, NewUpstreamError(statusCode, "http_error", fmt.Sprintf("美图状态接口返回 HTTP %d", statusCode), responseBytes)
+		return StatusResult{}, newHTTPUpstreamError(statusCode, "状态接口返回 HTTP %d", responseBytes)
 	}
 
 	var response statusResponse
 	if err := json.Unmarshal(responseBytes, &response); err != nil {
-		return StatusResult{}, NewUpstreamError(statusCode, "invalid_response", "美图状态响应无法解析", responseBytes)
+		return StatusResult{}, NewUpstreamError(statusCode, "invalid_response", "状态响应无法解析", responseBytes)
 	}
-	if response.Code != 0 || response.ErrorCode != 0 {
-		return StatusResult{}, NewUpstreamError(statusCode, response.NormalizedCode(), response.NormalizedMessage("美图状态查询失败"), responseBytes)
+	if response.HasError() {
+		return StatusResult{}, NewUpstreamError(statusCode, response.NormalizedCode(), response.NormalizedMessage("状态查询失败"), responseBytes)
 	}
 
 	result := StatusResult{
@@ -136,7 +136,7 @@ func (c *Client) Status(ctx context.Context, credential credentials.Credential, 
 	if response.Data.Status != UpstreamStatusCompleted {
 		result.Failed = true
 		result.FailureCode = fmt.Sprintf("status_%d", response.Data.Status)
-		result.FailureMessage = fmt.Sprintf("美图上游任务失败，状态码 %d", response.Data.Status)
+		result.FailureMessage = fmt.Sprintf("上游任务失败，状态码 %d", response.Data.Status)
 		return result, nil
 	}
 
@@ -146,18 +146,18 @@ func (c *Client) Status(ctx context.Context, credential credentials.Credential, 
 		result.FailureCode = fmt.Sprintf("return_json_data_code_%d", returnJSONData.Code)
 		result.FailureMessage = strings.TrimSpace(returnJSONData.ErrorMessage)
 		if result.FailureMessage == "" {
-			result.FailureMessage = "美图分层结果返回业务错误"
+			result.FailureMessage = "分层结果返回业务错误"
 		}
 		return result, nil
 	}
 
 	projectJSONText := returnJSONData.JSONData
 	if strings.TrimSpace(projectJSONText) == "" {
-		return StatusResult{}, NewProjectJSONParseError("美图完成响应缺少 project json")
+		return StatusResult{}, NewProjectJSONParseError("完成响应缺少 project json")
 	}
 	var projectJSON map[string]any
 	if err := json.Unmarshal([]byte(projectJSONText), &projectJSON); err != nil {
-		return StatusResult{}, NewProjectJSONParseError("美图 project json 无法解析")
+		return StatusResult{}, NewProjectJSONParseError("project json 无法解析")
 	}
 	width, height, layerCount := summarizeProject(projectJSON)
 	result.ProjectJSON = projectJSON
@@ -364,9 +364,27 @@ func NewUpstreamError(httpStatus int, code string, message string, body []byte) 
 	return &UpstreamError{
 		HTTPStatus: httpStatus,
 		Code:       normalizeCode(code),
-		Message:    message,
+		Message:    strings.TrimSpace(message),
 		Body:       truncateBody(body),
 	}
+}
+
+func newHTTPUpstreamError(httpStatus int, fallbackFormat string, body []byte) *UpstreamError {
+	code := "http_error"
+	message := fmt.Sprintf(fallbackFormat, httpStatus)
+	if parsed, ok := parseCommonResponseError(body); ok {
+		code = parsed.NormalizedCode(code)
+		message = parsed.NormalizedMessage(message)
+	}
+	return NewUpstreamError(httpStatus, code, message, body)
+}
+
+func parseCommonResponseError(body []byte) (commonResponseError, bool) {
+	var parsed commonResponseError
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return commonResponseError{}, false
+	}
+	return parsed, true
 }
 
 type ProjectJSONParseError struct {
@@ -462,12 +480,15 @@ func (r submitResponse) NormalizedMessage(fallback string) string {
 }
 
 type statusResponse struct {
-	RequestID string `json:"request_id"`
-	TraceID   string `json:"trace_id"`
-	Code      int    `json:"code"`
-	ErrorCode int    `json:"error_code"`
-	Message   string `json:"message"`
-	Data      struct {
+	RequestID    string `json:"request_id"`
+	TraceID      string `json:"trace_id"`
+	Code         int    `json:"code"`
+	ErrorCode    int    `json:"error_code"`
+	Message      string `json:"message"`
+	Error        string `json:"error"`
+	ErrorMsg     string `json:"error_msg"`
+	ErrorMessage string `json:"error_message"`
+	Data         struct {
 		Status   int     `json:"status"`
 		Progress float64 `json:"progress"`
 		Result   struct {
@@ -484,12 +505,23 @@ type statusResponse struct {
 	} `json:"data"`
 }
 
+func (r statusResponse) HasError() bool {
+	return r.Code != 0 ||
+		r.ErrorCode != 0 ||
+		strings.TrimSpace(r.Error) != "" ||
+		strings.TrimSpace(r.ErrorMsg) != "" ||
+		strings.TrimSpace(r.ErrorMessage) != ""
+}
+
 func (r statusResponse) NormalizedCode() string {
 	if r.ErrorCode != 0 {
 		return fmt.Sprintf("error_code_%d", r.ErrorCode)
 	}
 	if r.Code != 0 {
 		return fmt.Sprintf("code_%d", r.Code)
+	}
+	if r.Error != "" {
+		return r.Error
 	}
 	if r.Message != "" {
 		return r.Message
@@ -498,8 +530,49 @@ func (r statusResponse) NormalizedCode() string {
 }
 
 func (r statusResponse) NormalizedMessage(fallback string) string {
+	if strings.TrimSpace(r.ErrorMessage) != "" {
+		return r.ErrorMessage
+	}
+	if strings.TrimSpace(r.ErrorMsg) != "" {
+		return r.ErrorMsg
+	}
+	if strings.TrimSpace(r.Error) != "" {
+		return r.Error
+	}
 	if strings.TrimSpace(r.Message) != "" {
 		return r.Message
+	}
+	return fallback
+}
+
+type commonResponseError struct {
+	Code         int    `json:"code"`
+	ErrorCode    int    `json:"error_code"`
+	Message      string `json:"message"`
+	Error        string `json:"error"`
+	ErrorMsg     string `json:"error_msg"`
+	ErrorMessage string `json:"error_message"`
+	Msg          string `json:"msg"`
+}
+
+func (r commonResponseError) NormalizedCode(fallback string) string {
+	if r.ErrorCode != 0 {
+		return fmt.Sprintf("error_code_%d", r.ErrorCode)
+	}
+	if r.Code != 0 {
+		return fmt.Sprintf("code_%d", r.Code)
+	}
+	if strings.TrimSpace(r.Error) != "" {
+		return r.Error
+	}
+	return fallback
+}
+
+func (r commonResponseError) NormalizedMessage(fallback string) string {
+	for _, candidate := range []string{r.ErrorMessage, r.ErrorMsg, r.Error, r.Message, r.Msg} {
+		if strings.TrimSpace(candidate) != "" {
+			return candidate
+		}
 	}
 	return fallback
 }

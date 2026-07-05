@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/98624017/meitu-layering-proxy/internal/credentials"
@@ -170,7 +173,7 @@ func (s *Service) processQueuedTask(ctx context.Context, id string, now time.Tim
 				return nil
 			}
 			if !now.Before(task.QueueDeadlineAt) {
-				task.MarkFailed(ErrorQueueTimeoutBeforeUpstream, "美图代理排队超过 10 分钟，尚未请求到上游", now)
+				task.MarkFailed(ErrorQueueTimeoutBeforeUpstream, "任务排队超过 10 分钟，尚未请求上游服务", now)
 				return nil
 			}
 			task.Status = StatusAcquiringCredential
@@ -231,10 +234,14 @@ func (s *Service) processQueuedTask(ctx context.Context, id string, now time.Tim
 			}
 			task.LeasedCredentialName = ""
 			task.LeasedCredentialID = ""
-			task.MarkFailed(ErrorUpstreamSubmitFailed, "美图任务提交失败", submittedAt)
+			task.MarkFailed(ErrorUpstreamSubmitFailed, upstreamErrorMessage(err, "任务提交失败"), submittedAt)
 			return nil
 		})
-		slog.Warn("meitu_submit_failed", "task_id", id, "credential", lease.Credential.Name, "error", sanitizeError(err))
+		slog.Warn("meitu_submit_failed", appendUpstreamErrorAttrs([]any{
+			"task_id", id,
+			"credential", lease.Credential.Name,
+			"error", sanitizeError(err),
+		}, err)...)
 		return
 	}
 }
@@ -247,7 +254,7 @@ func (s *Service) pollUpstreamStatus(ctx context.Context, task *Task, now time.T
 				s.pool.Release(current.LeasedCredentialID)
 				current.LeasedCredentialName = ""
 				current.LeasedCredentialID = ""
-				current.MarkFailed(ErrorInternal, "美图凭证租约不存在", now)
+				current.MarkFailed(ErrorInternal, "凭证租约不存在", now)
 			}
 			return nil
 		})
@@ -259,10 +266,12 @@ func (s *Service) pollUpstreamStatus(ctx context.Context, task *Task, now time.T
 	observedAt := s.now().UTC()
 	if err != nil {
 		code := ErrorUpstreamPollFailed
-		message := "美图状态查询失败"
+		message := "状态查询失败"
 		if meitu.IsProjectJSONParseError(err) {
 			code = ErrorProjectJSONParseFailed
-			message = "美图分层工程 JSON 解析失败"
+			message = "分层工程 JSON 解析失败"
+		} else {
+			message = upstreamErrorMessage(err, message)
 		}
 		_ = s.store.Update(task.ID, func(current *Task) error {
 			if current.IsTerminal() {
@@ -274,7 +283,10 @@ func (s *Service) pollUpstreamStatus(ctx context.Context, task *Task, now time.T
 			current.MarkFailed(code, message, observedAt)
 			return nil
 		})
-		slog.Warn("meitu_status_failed", "task_id", task.ID, "error", sanitizeError(err))
+		slog.Warn("meitu_status_failed", appendUpstreamErrorAttrs([]any{
+			"task_id", task.ID,
+			"error", sanitizeError(err),
+		}, err)...)
 		refreshed, _ := s.store.Get(task.ID)
 		return refreshed
 	}
@@ -291,7 +303,7 @@ func (s *Service) pollUpstreamStatus(ctx context.Context, task *Task, now time.T
 			current.LeasedCredentialID = ""
 			message := result.FailureMessage
 			if message == "" {
-				message = "美图上游任务失败"
+				message = "上游任务失败"
 			}
 			if result.FailureCode != "" {
 				current.UpstreamStatus = result.FailureCode
@@ -330,7 +342,7 @@ func (s *Service) failQueueExpiredTask(id string, now time.Time) bool {
 			task.LeasedCredentialID = ""
 		}
 		task.RequestedUpstream = false
-		task.MarkFailed(ErrorQueueTimeoutBeforeUpstream, "美图代理排队超过 10 分钟，尚未请求到上游", now)
+		task.MarkFailed(ErrorQueueTimeoutBeforeUpstream, "任务排队超过 10 分钟，尚未请求上游服务", now)
 		changed = true
 		return nil
 	})
@@ -352,7 +364,7 @@ func (s *Service) failLeaseExpiredTask(id string, now time.Time) bool {
 		s.pool.Release(task.LeasedCredentialID)
 		task.LeasedCredentialName = ""
 		task.LeasedCredentialID = ""
-		task.MarkFailed(ErrorUpstreamLeaseTimeout, "美图上游任务超过本地凭证占用保护时间，已释放本地凭证", now)
+		task.MarkFailed(ErrorUpstreamLeaseTimeout, "上游任务超过本地凭证占用保护时间，已释放本地凭证", now)
 		changed = true
 		return nil
 	})
@@ -381,12 +393,73 @@ func sanitizeError(err error) string {
 	if err == nil {
 		return ""
 	}
-	message := err.Error()
+	return sanitizeText(err.Error())
+}
+
+func sanitizeText(message string) string {
 	const maxLen = 300
 	if len(message) > maxLen {
 		return message[:maxLen]
 	}
 	return message
+}
+
+func upstreamErrorMessage(err error, fallback string) string {
+	var upstreamErr *meitu.UpstreamError
+	if !errors.As(err, &upstreamErr) {
+		return fallback
+	}
+
+	detail := strings.TrimSpace(upstreamErr.Message)
+	if detail == "" {
+		detail = fallback
+	}
+	detail = sanitizePublicVendorText(detail)
+	if detail != fallback {
+		detail = fallback + "：" + detail
+	}
+
+	diagnostics := make([]string, 0, 2)
+	if upstreamErr.Code != "" && upstreamErr.Code != "upstream_error" {
+		diagnostics = append(diagnostics, "上游 code: "+sanitizePublicVendorText(upstreamErr.Code))
+	}
+	if upstreamErr.HTTPStatus > 0 {
+		diagnostics = append(diagnostics, fmt.Sprintf("HTTP %d", upstreamErr.HTTPStatus))
+	}
+	if len(diagnostics) == 0 {
+		return detail
+	}
+	return detail + "（" + strings.Join(diagnostics, "，") + "）"
+}
+
+func sanitizePublicVendorText(value string) string {
+	replacer := strings.NewReplacer(
+		"meituan", "upstream",
+		"Meituan", "upstream",
+		"MEITUAN", "upstream",
+		"meitu", "upstream",
+		"Meitu", "upstream",
+		"MEITU", "upstream",
+		"美团", "上游服务",
+		"美图", "上游服务",
+	)
+	return replacer.Replace(value)
+}
+
+func appendUpstreamErrorAttrs(attrs []any, err error) []any {
+	var upstreamErr *meitu.UpstreamError
+	if !errors.As(err, &upstreamErr) {
+		return attrs
+	}
+	attrs = append(attrs,
+		"upstream_http_status", upstreamErr.HTTPStatus,
+		"upstream_code", upstreamErr.Code,
+		"upstream_message", sanitizeText(upstreamErr.Message),
+	)
+	if upstreamErr.Body != "" {
+		attrs = append(attrs, "upstream_body", sanitizeText(upstreamErr.Body))
+	}
+	return attrs
 }
 
 func generateTaskID() (string, error) {

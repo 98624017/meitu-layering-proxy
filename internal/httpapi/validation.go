@@ -23,7 +23,7 @@ func ValidateCreateRequest(request CreateVideoRequest) (string, string, bool, er
 		return "", "", false, errors.New("model 是必填字段")
 	}
 	if model != supportedModel {
-		return "", "", false, errors.New("model 只支持 meitu-layering")
+		return "", "", false, errors.New("model 不支持")
 	}
 
 	image := strings.TrimSpace(request.Image)

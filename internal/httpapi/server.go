@@ -92,7 +92,7 @@ func (s *Server) handleVideos(w http.ResponseWriter, r *http.Request) {
 	task, err := s.taskService.CreateTask(model, imageURL, subjectProtectFlag)
 	if err != nil {
 		if errors.Is(err, tasks.ErrTaskQueueFull) {
-			WriteError(w, http.StatusTooManyRequests, CodeTaskQueueFull, "美图代理任务队列已满，请稍后重试")
+			WriteError(w, http.StatusTooManyRequests, CodeTaskQueueFull, "任务队列已满，请稍后重试")
 			return
 		}
 		slog.Error("create_task_failed", "error", err)

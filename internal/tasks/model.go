@@ -11,12 +11,12 @@ const (
 )
 
 const (
-	ErrorQueueTimeoutBeforeUpstream = "meitu_queue_timeout_before_upstream"
-	ErrorUpstreamLeaseTimeout       = "meitu_upstream_lease_timeout"
-	ErrorUpstreamSubmitFailed       = "meitu_upstream_submit_failed"
-	ErrorUpstreamPollFailed         = "meitu_upstream_poll_failed"
-	ErrorUpstreamFailed             = "meitu_upstream_failed"
-	ErrorProjectJSONParseFailed     = "meitu_project_json_parse_failed"
+	ErrorQueueTimeoutBeforeUpstream = "queue_timeout_before_upstream"
+	ErrorUpstreamLeaseTimeout       = "upstream_lease_timeout"
+	ErrorUpstreamSubmitFailed       = "upstream_submit_failed"
+	ErrorUpstreamPollFailed         = "upstream_poll_failed"
+	ErrorUpstreamFailed             = "upstream_failed"
+	ErrorProjectJSONParseFailed     = "project_json_parse_failed"
 	ErrorInternal                   = "internal_error"
 )
 

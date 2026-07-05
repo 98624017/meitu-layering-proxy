@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -170,6 +171,59 @@ func TestServiceCompletesOnRealtimeGet(t *testing.T) {
 	}
 	if client.statusCalls != 1 {
 		t.Fatalf("status calls = %d, want 1", client.statusCalls)
+	}
+}
+
+func TestServiceStatusUpstreamErrorExposesUpstreamMessage(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	store := NewMemoryStore()
+	pool := credentials.NewPool([]config.CredentialConfig{{
+		Name:           "acc1",
+		AppKey:         "ak",
+		SecretID:       "sk",
+		MaxConcurrency: 1,
+	}})
+	client := &fakeMeituClient{
+		submitResult: meitu.SubmitResult{UpstreamTaskID: "mt-task", Status: 9},
+		statusErr:    meitu.NewUpstreamError(200, "meitu_error_30001", "美图图片下载失败", []byte(`{"error_code":30001,"error_msg":"美图图片下载失败"}`)),
+	}
+	service := NewService(ServiceOptions{
+		Store:                store,
+		Pool:                 pool,
+		Client:               client,
+		QueueTimeout:         time.Minute,
+		UpstreamLeaseTimeout: time.Minute,
+		TaskTTL:              time.Hour,
+		MaxQueuedTasks:       100,
+	})
+	SetNowForTest(service, func() time.Time { return now })
+
+	task, err := service.CreateTask("meitu-layering", "https://example.com/image.png", false)
+	if err != nil {
+		t.Fatalf("CreateTask error: %v", err)
+	}
+	service.ProcessOnce(context.Background())
+
+	now = now.Add(time.Second)
+	failed, ok := service.RefreshTask(context.Background(), task.ID)
+	if !ok {
+		t.Fatal("task not found")
+	}
+	if failed.Status != StatusFailed {
+		t.Fatalf("status = %s, want failed", failed.Status)
+	}
+	if failed.Error == nil || failed.Error.Code != ErrorUpstreamPollFailed {
+		t.Fatalf("error = %#v, want poll failed", failed.Error)
+	}
+	wantMessage := "状态查询失败：上游服务图片下载失败（上游 code: upstream_error_30001，HTTP 200）"
+	if failed.Error.Message != wantMessage {
+		t.Fatalf("message = %q, want %q", failed.Error.Message, wantMessage)
+	}
+	if strings.Contains(failed.Error.Message, "美图") || strings.Contains(failed.Error.Message, "meitu") {
+		t.Fatalf("message exposes vendor name: %q", failed.Error.Message)
+	}
+	if pool.ActiveCount("acc1") != 0 {
+		t.Fatalf("active count = %d, want 0", pool.ActiveCount("acc1"))
 	}
 }
 
