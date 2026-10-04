@@ -22,8 +22,9 @@ import (
 )
 
 const (
-	SubmitPath = "/whee/business/image_layering.json"
-	StatusPath = "/api/v1/sdk/status"
+	SubmitPath   = "/api/v1/sdk/sync/push"
+	StatusPath   = "/api/v1/sdk/status"
+	LayeringTask = "/v1/poster_trans_rob/491768"
 
 	UpstreamStatusCompleted = 10
 )
@@ -46,10 +47,39 @@ func NewClient(baseURL string, httpClient *http.Client) *Client {
 }
 
 func (c *Client) Submit(ctx context.Context, credential credentials.Credential, input SubmitInput) (SubmitResult, error) {
-	body := submitRequest{
-		ImageFile:          input.ImageURL,
-		SubjectProtectFlag: input.SubjectProtectFlag,
-		SyncTimeout:        1,
+	businessSide, psdFlag := "", "1"
+	if !input.Options.TextEditable {
+		businessSide, psdFlag = "text_none_editable", "0"
+	}
+	params, err := json.Marshal(map[string]any{
+		"rsp_media_type": "url",
+		"parameter": map[string]any{
+			"eliminate_type":        "big",
+			"only_text_eliminate":   input.Options.OnlyTextEliminate,
+			"ori_lang":              input.Options.OriLang,
+			"poster_translate_flag": "9",
+			"subject_protect_flag":  input.Options.SubjectProtectFlag,
+			"target_lang":           "ch",
+			"business_side_flag":    businessSide,
+			"generate_picture_flag": "0",
+			"convert_json_psd_flag": psdFlag,
+		},
+	})
+	if err != nil {
+		return SubmitResult{}, fmt.Errorf("marshal layering parameters: %w", err)
+	}
+	body := map[string]any{
+		"task":      LayeringTask,
+		"task_type": "formula",
+		"init_images": []any{map[string]any{
+			"url": input.ImageURL,
+			"profile": map[string]any{
+				"media_profiles": map[string]string{"media_data_type": "url"},
+				"version":        "v1",
+			},
+		}},
+		"params":       string(params),
+		"sync_timeout": 1,
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
@@ -74,22 +104,33 @@ func (c *Client) Submit(ctx context.Context, credential credentials.Credential, 
 		return SubmitResult{}, newHTTPUpstreamError(statusCode, "提交接口返回 HTTP %d", responseBytes)
 	}
 
-	var response submitResponse
+	var response statusResponse
 	if err := json.Unmarshal(responseBytes, &response); err != nil {
 		return SubmitResult{}, NewUpstreamError(statusCode, "invalid_response", "提交响应无法解析", responseBytes)
 	}
-	if response.Code != 0 {
+	if response.HasError() {
 		return SubmitResult{}, NewUpstreamError(statusCode, response.NormalizedCode(), response.NormalizedMessage("任务提交失败"), responseBytes)
 	}
-	upstreamTaskID := strings.TrimSpace(response.Data.Result.ID)
+	upstreamTaskID := strings.TrimSpace(response.Data.TaskID)
+	if upstreamTaskID == "" {
+		upstreamTaskID = strings.TrimSpace(response.Data.Result.ID)
+	}
 	if upstreamTaskID == "" {
 		return SubmitResult{}, NewUpstreamError(statusCode, "missing_task_id", "提交响应缺少任务 ID", responseBytes)
 	}
 
-	return SubmitResult{
+	result := SubmitResult{
 		UpstreamTaskID: upstreamTaskID,
 		Status:         response.Data.Status,
-	}, nil
+	}
+	if !isInProgressStatus(response.Data.Status) {
+		terminal, err := response.parseResult()
+		if err != nil {
+			return SubmitResult{}, err
+		}
+		result.Result = &terminal
+	}
+	return result, nil
 }
 
 func (c *Client) Status(ctx context.Context, credential credentials.Credential, upstreamTaskID string) (StatusResult, error) {
@@ -122,11 +163,17 @@ func (c *Client) Status(ctx context.Context, credential credentials.Credential, 
 		return StatusResult{}, NewUpstreamError(statusCode, response.NormalizedCode(), response.NormalizedMessage("状态查询失败"), responseBytes)
 	}
 
+	return response.parseResult()
+}
+
+func (response statusResponse) parseResult() (StatusResult, error) {
 	result := StatusResult{
 		Status:   response.Data.Status,
 		Progress: response.Data.Progress,
 	}
-	if response.Data.Result.ID != "" {
+	if response.Data.TaskID != "" {
+		result.UpstreamTaskID = response.Data.TaskID
+	} else if response.Data.Result.ID != "" {
 		result.UpstreamTaskID = response.Data.Result.ID
 	}
 
@@ -141,14 +188,24 @@ func (c *Client) Status(ctx context.Context, credential credentials.Credential, 
 	}
 
 	returnJSONData := response.Data.Result.Parameters.ReturnJSONData
-	if returnJSONData.Code != 0 {
-		result.Failed = true
-		result.FailureCode = fmt.Sprintf("return_json_data_code_%d", returnJSONData.Code)
-		result.FailureMessage = strings.TrimSpace(returnJSONData.ErrorMessage)
-		if result.FailureMessage == "" {
-			result.FailureMessage = "分层结果返回业务错误"
+	for _, failure := range []struct {
+		code            int
+		message, source string
+	}{
+		{returnJSONData.Code, returnJSONData.ErrorMessage, "return_json_data"},
+		{response.Data.Result.Data.ErrorCode, response.Data.Result.Data.ErrorMsg, "algorithm"},
+		{response.Data.Result.MTLab.ErrorCode, response.Data.Result.MTLab.ErrorMsg, "mtlab"},
+		{response.Data.Result.MTLab.LegacyCode, response.Data.Result.MTLab.LegacyMessage, "mtlab"},
+	} {
+		if failure.code != 0 {
+			result.Failed = true
+			result.FailureCode = fmt.Sprintf("%s_code_%d", failure.source, failure.code)
+			result.FailureMessage = strings.TrimSpace(failure.message)
+			if result.FailureMessage == "" {
+				result.FailureMessage = "分层结果返回业务错误"
+			}
+			return result, nil
 		}
-		return result, nil
 	}
 
 	projectJSONText := returnJSONData.JSONData
@@ -156,11 +213,20 @@ func (c *Client) Status(ctx context.Context, credential credentials.Credential, 
 		return StatusResult{}, NewProjectJSONParseError("完成响应缺少 project json")
 	}
 	var projectJSON map[string]any
-	if err := json.Unmarshal([]byte(projectJSONText), &projectJSON); err != nil {
+	if err := json.Unmarshal([]byte(projectJSONText), &projectJSON); err != nil || projectJSON == nil {
 		return StatusResult{}, NewProjectJSONParseError("project json 无法解析")
+	}
+	psdURL, _ := projectJSON["image_psd_url"].(string)
+	parsedURL, err := url.Parse(strings.TrimSpace(psdURL))
+	if err != nil || parsedURL.Host == "" || parsedURL.User != nil || (parsedURL.Scheme != "https" && parsedURL.Scheme != "http") {
+		result.Failed = true
+		result.FailureCode = "missing_psd_url"
+		result.FailureMessage = "上游任务完成，但未返回有效的 PSD 下载地址"
+		return result, nil
 	}
 	width, height, layerCount := summarizeProject(projectJSON)
 	result.ProjectJSON = projectJSON
+	result.PSDURL = parsedURL.String()
 	result.Width = width
 	result.Height = height
 	result.LayerCount = layerCount
@@ -291,23 +357,12 @@ func stringToSign(canonicalRequest string, sdkDate string) string {
 }
 
 func summarizeProject(projectJSON map[string]any) (int, int, int) {
-	templateConfValue, ok := projectJSON["templateConf"].([]any)
-	if !ok || len(templateConfValue) == 0 {
-		return 0, 0, 0
-	}
-	first, ok := templateConfValue[0].(map[string]any)
-	if !ok {
-		return 0, 0, 0
-	}
-
-	width := numberToInt(first["width"])
-	height := numberToInt(first["height"])
-	layers, _ := first["layers"].([]any)
-	return width, height, len(layers)
+	layers, _ := projectJSON["templateConf"].([]any)
+	return numberToInt(projectJSON["width"]), numberToInt(projectJSON["height"]), len(layers)
 }
 
 func isInProgressStatus(status int) bool {
-	return status == 0 || status == 9
+	return status == 0 || status == 1 || status == 9
 }
 
 func numberToInt(value any) int {
@@ -324,13 +379,21 @@ func numberToInt(value any) int {
 }
 
 type SubmitInput struct {
-	ImageURL           string
-	SubjectProtectFlag bool
+	ImageURL string
+	Options  LayeringOptions
+}
+
+type LayeringOptions struct {
+	TextEditable       bool   `json:"text_editable"`
+	SubjectProtectFlag bool   `json:"subject_protect_flag"`
+	OriLang            string `json:"ori_lang"`
+	OnlyTextEliminate  bool   `json:"only_text_eliminate"`
 }
 
 type SubmitResult struct {
 	UpstreamTaskID string
 	Status         int
+	Result         *StatusResult
 }
 
 type StatusResult struct {
@@ -338,6 +401,7 @@ type StatusResult struct {
 	Status         int
 	Progress       float64
 	ProjectJSON    map[string]any
+	PSDURL         string
 	Width          int
 	Height         int
 	LayerCount     int
@@ -440,45 +504,6 @@ func truncateBody(body []byte) string {
 	return string(body)
 }
 
-type submitRequest struct {
-	ImageFile          string `json:"image_file"`
-	SubjectProtectFlag bool   `json:"subject_protect_flag"`
-	SyncTimeout        int    `json:"sync_timeout"`
-}
-
-type submitResponse struct {
-	ReqID   string `json:"reqid"`
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-	Error   string `json:"error"`
-	Data    struct {
-		Status int `json:"status"`
-		Result struct {
-			ID string `json:"id"`
-		} `json:"result"`
-	} `json:"data"`
-}
-
-func (r submitResponse) NormalizedCode() string {
-	if r.Error != "" {
-		return r.Error
-	}
-	if r.Message != "" {
-		return r.Message
-	}
-	return fmt.Sprintf("code_%d", r.Code)
-}
-
-func (r submitResponse) NormalizedMessage(fallback string) string {
-	if strings.TrimSpace(r.Message) != "" {
-		return r.Message
-	}
-	if strings.TrimSpace(r.Error) != "" {
-		return r.Error
-	}
-	return fallback
-}
-
 type statusResponse struct {
 	RequestID    string `json:"request_id"`
 	TraceID      string `json:"trace_id"`
@@ -489,10 +514,18 @@ type statusResponse struct {
 	ErrorMsg     string `json:"error_msg"`
 	ErrorMessage string `json:"error_message"`
 	Data         struct {
+		TaskID   string  `json:"task_id"`
 		Status   int     `json:"status"`
 		Progress float64 `json:"progress"`
 		Result   struct {
-			ID         string `json:"id"`
+			ID    string              `json:"id"`
+			Data  commonResponseError `json:"data"`
+			MTLab struct {
+				ErrorCode     int    `json:"error_code"`
+				ErrorMsg      string `json:"error_msg"`
+				LegacyCode    int    `json:"ErrorCode"`
+				LegacyMessage string `json:"ErrorMsg"`
+			} `json:"mtlab_res"`
 			Parameters struct {
 				ReturnJSONData struct {
 					Code         int    `json:"code"`
