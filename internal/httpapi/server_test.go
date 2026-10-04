@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/98624017/meitu-layering-proxy/internal/auth"
+	"github.com/98624017/meitu-layering-proxy/internal/meitu"
 	"github.com/98624017/meitu-layering-proxy/internal/tasks"
 )
 
@@ -21,7 +22,7 @@ func TestCreateTaskValidation(t *testing.T) {
 	server := NewServer(service, auth.NewMiddleware("secret"))
 	handler := server.Handler()
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{"model":"meitu-layering","image":"http://127.0.0.1/input.png"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{"model":"layering-v2","image":"http://127.0.0.1/input.png"}`))
 	req.Header.Set("Authorization", "Bearer secret")
 	req.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
@@ -50,7 +51,7 @@ func TestCreateTaskRejectsDomainResolvingToPrivateIP(t *testing.T) {
 	server := NewServer(service, auth.NewMiddleware("secret"))
 	handler := server.Handler()
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{"model":"meitu-layering","image":"http://127.0.0.1.nip.io/input.png"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{"model":"layering-v2","image":"http://127.0.0.1.nip.io/input.png"}`))
 	req.Header.Set("Authorization", "Bearer secret")
 	req.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
@@ -66,29 +67,34 @@ func TestCreateTaskRejectsDomainResolvingToPrivateIP(t *testing.T) {
 }
 
 func TestCreateTaskRejectsUnsupportedModel(t *testing.T) {
-	oldResolver := publicURLResolver
-	publicURLResolver = fakeResolver{"example.com": {{IP: net.ParseIP("93.184.216.34")}}}
-	defer func() { publicURLResolver = oldResolver }()
-
-	service := &fakeTaskService{}
-	server := NewServer(service, auth.NewMiddleware("secret"))
-	handler := server.Handler()
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{"model":"other-video-model","image":"https://example.com/input.png"}`))
-	req.Header.Set("Authorization", "Bearer secret")
-	req.Header.Set("Content-Type", "application/json")
-	recorder := httptest.NewRecorder()
-
-	handler.ServeHTTP(recorder, req)
-
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", recorder.Code)
-	}
-	if !strings.Contains(recorder.Body.String(), CodeInvalidRequest) {
-		t.Fatalf("body = %s, want invalid_request", recorder.Body.String())
-	}
-	if service.created {
-		t.Fatal("task was created despite unsupported model")
+	for _, tc := range []struct {
+		model, message string
+	}{
+		{"meitu-layering", "meitu-layering 已停用，请升级客户端并使用 layering-v2"},
+		{" meitu-layering ", "meitu-layering 已停用，请升级客户端并使用 layering-v2"},
+		{"other-video-model", "model 不支持"},
+		{"", "model 是必填字段"},
+	} {
+		t.Run(tc.model, func(t *testing.T) {
+			service := &fakeTaskService{}
+			server := NewServer(service, auth.NewMiddleware("secret"))
+			body, err := json.Marshal(map[string]string{"model": tc.model})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/videos", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer secret")
+			req.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			server.Handler().ServeHTTP(recorder, req)
+			var response ErrorResponse
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if recorder.Code != http.StatusBadRequest || response.Error.Code != CodeInvalidRequest || response.Error.Message != tc.message || service.created {
+				t.Fatalf("status=%d error=%+v created=%v", recorder.Code, response.Error, service.created)
+			}
+		})
 	}
 }
 
@@ -101,7 +107,7 @@ func TestCreateTaskReturnsQueuedVideoResponse(t *testing.T) {
 	service := &fakeTaskService{
 		task: &tasks.Task{
 			ID:              "meitu_task_1",
-			Model:           "meitu-layering",
+			Model:           "layering-v2",
 			Status:          tasks.StatusQueued,
 			Progress:        0,
 			CreatedAt:       now,
@@ -111,7 +117,7 @@ func TestCreateTaskReturnsQueuedVideoResponse(t *testing.T) {
 	server := NewServer(service, auth.NewMiddleware("secret"))
 	handler := server.Handler()
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/videos", bytes.NewBufferString(`{"model":"meitu-layering","prompt":"ignored","image":"https://example.com/input.png","subject_protect_flag":true}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/videos", bytes.NewBufferString(`{"model":"layering-v2","prompt":"ignored","image":"https://example.com/input.png","subject_protect_flag":true}`))
 	req.Header.Set("Authorization", "Bearer secret")
 	req.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
@@ -131,8 +137,8 @@ func TestCreateTaskReturnsQueuedVideoResponse(t *testing.T) {
 	if response.Object != "video" || response.Status != "queued" {
 		t.Fatalf("unexpected object/status: %#v", response)
 	}
-	if !service.created || service.subjectProtectFlag != true {
-		t.Fatalf("service created=%v subjectProtectFlag=%v", service.created, service.subjectProtectFlag)
+	if !service.created || !service.options.SubjectProtectFlag || !service.options.TextEditable {
+		t.Fatalf("service created=%v options=%+v", service.created, service.options)
 	}
 }
 
@@ -145,7 +151,7 @@ func TestCreateTaskIgnoresUnsupportedVideoCompatibilityFields(t *testing.T) {
 	service := &fakeTaskService{
 		task: &tasks.Task{
 			ID:        "meitu_task_1",
-			Model:     "meitu-layering",
+			Model:     "layering-v2",
 			Status:    tasks.StatusQueued,
 			CreatedAt: now,
 		},
@@ -154,7 +160,7 @@ func TestCreateTaskIgnoresUnsupportedVideoCompatibilityFields(t *testing.T) {
 	handler := server.Handler()
 
 	body := `{
-		"model":"meitu-layering",
+		"model":"layering-v2",
 		"image":"https://example.com/input.png",
 		"duration":"5",
 		"size":"1024x1024",
@@ -184,7 +190,7 @@ func TestCreateTaskQueueFull(t *testing.T) {
 	server := NewServer(service, auth.NewMiddleware("secret"))
 	handler := server.Handler()
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/videos", bytes.NewBufferString(`{"model":"meitu-layering","image":"https://example.com/input.png"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/videos", bytes.NewBufferString(`{"model":"layering-v2","image":"https://example.com/input.png"}`))
 	req.Header.Set("Authorization", "Bearer secret")
 	req.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
@@ -196,6 +202,51 @@ func TestCreateTaskQueueFull(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), CodeTaskQueueFull) {
 		t.Fatalf("body = %s, want queue full code", recorder.Body.String())
+	}
+}
+
+func TestLayeringOptions(t *testing.T) {
+	oldResolver := publicURLResolver
+	publicURLResolver = fakeResolver{"example.com": {{IP: net.ParseIP("93.184.216.34")}}}
+	defer func() { publicURLResolver = oldResolver }()
+	for _, tc := range []struct {
+		name, fields string
+		wantError    bool
+		want         meitu.LayeringOptions
+	}{
+		{"defaults", ``, false, meitu.LayeringOptions{TextEditable: true, OriLang: "ch"}},
+		{"non_editable", `,"text_editable":false`, false, meitu.LayeringOptions{OriLang: "ch"}},
+		{"options", `,"text_editable":true,"subject_protect_flag":true,"ori_lang":"korean","only_text_eliminate":true`, false, meitu.LayeringOptions{TextEditable: true, SubjectProtectFlag: true, OriLang: "korean", OnlyTextEliminate: true}},
+		{"string_boolean", `,"text_editable":"false"`, true, meitu.LayeringOptions{}},
+		{"invalid_eliminate", `,"only_text_eliminate":"true"`, true, meitu.LayeringOptions{}},
+		{"invalid_protect", `,"subject_protect_flag":1`, true, meitu.LayeringOptions{}},
+		{"invalid_language", `,"ori_lang":"auto"`, true, meitu.LayeringOptions{}},
+		{"prompt_ignored", `,"prompt":"{\"text_editable\":false}"`, false, meitu.LayeringOptions{TextEditable: true, OriLang: "ch"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service := &fakeTaskService{}
+			server := NewServer(service, auth.NewMiddleware("secret"))
+			body := `{"model":"layering-v2","input_reference":"https://example.com/input.png"` + tc.fields + `}`
+			req := httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer secret")
+			req.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			server.Handler().ServeHTTP(recorder, req)
+			wantStatus := http.StatusOK
+			if tc.wantError {
+				wantStatus = http.StatusBadRequest
+			}
+			if recorder.Code != wantStatus || service.created == tc.wantError {
+				t.Fatalf("status=%d created=%v body=%s", recorder.Code, service.created, recorder.Body.String())
+			}
+			if !tc.wantError && service.options != tc.want {
+				t.Fatalf("options=%+v want=%+v", service.options, tc.want)
+			}
+		})
+	}
+	_, _, _, err := ValidateCreateRequest(CreateVideoRequest{Model: "layering-v2", Image: "https://example.com/a.png", InputReference: "https://example.com/b.png"})
+	if err == nil {
+		t.Fatal("conflicting image aliases must fail")
 	}
 }
 
@@ -217,15 +268,15 @@ func TestGetTaskNotFound(t *testing.T) {
 }
 
 type fakeTaskService struct {
-	task               *tasks.Task
-	created            bool
-	createErr          error
-	subjectProtectFlag bool
+	task      *tasks.Task
+	created   bool
+	createErr error
+	options   meitu.LayeringOptions
 }
 
-func (f *fakeTaskService) CreateTask(model string, imageURL string, subjectProtectFlag bool) (*tasks.Task, error) {
+func (f *fakeTaskService) CreateTask(model string, imageURL string, options meitu.LayeringOptions) (*tasks.Task, error) {
 	f.created = true
-	f.subjectProtectFlag = subjectProtectFlag
+	f.options = options
 	if f.createErr != nil {
 		return nil, f.createErr
 	}

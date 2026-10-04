@@ -11,7 +11,11 @@ type CreateVideoRequest struct {
 	Model              string `json:"model"`
 	Prompt             string `json:"prompt,omitempty"`
 	Image              string `json:"image"`
+	InputReference     string `json:"input_reference,omitempty"`
+	TextEditable       *bool  `json:"text_editable,omitempty"`
 	SubjectProtectFlag *bool  `json:"subject_protect_flag,omitempty"`
+	OriLang            string `json:"ori_lang,omitempty"`
+	OnlyTextEliminate  bool   `json:"only_text_eliminate,omitempty"`
 }
 
 type VideoResponse struct {
@@ -23,6 +27,9 @@ type VideoResponse struct {
 	Progress    int            `json:"progress"`
 	CreatedAt   int64          `json:"created_at"`
 	CompletedAt *int64         `json:"completed_at,omitempty"`
+	URL         string         `json:"url,omitempty"`
+	VideoURL    string         `json:"video_url,omitempty"`
+	ResultURL   string         `json:"result_url,omitempty"`
 	Error       *APIError      `json:"error,omitempty"`
 	Metadata    map[string]any `json:"metadata,omitempty"`
 }
@@ -36,6 +43,9 @@ func BuildVideoResponse(task *tasks.Task) VideoResponse {
 		Status:    task.PublicStatus(),
 		Progress:  task.Progress,
 		CreatedAt: unixSeconds(task.CreatedAt),
+		URL:       task.PSDURL,
+		VideoURL:  task.PSDURL,
+		ResultURL: task.PSDURL,
 	}
 	if !task.CompletedAt.IsZero() {
 		completedAt := unixSeconds(task.CompletedAt)
@@ -81,6 +91,10 @@ func buildMetadata(task *tasks.Task) map[string]any {
 	}
 	if task.ProjectJSON != nil {
 		meitu["project_json"] = task.ProjectJSON
+	}
+	if task.PSDURL != "" {
+		meitu["psd_url"] = task.PSDURL
+		meitu["result_format"] = "psd"
 	}
 	if task.Status == tasks.StatusFailed {
 		meitu["requested_upstream"] = task.RequestedUpstream

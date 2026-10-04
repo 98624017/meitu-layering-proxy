@@ -10,13 +10,14 @@ import (
 	"strings"
 
 	"github.com/98624017/meitu-layering-proxy/internal/auth"
+	"github.com/98624017/meitu-layering-proxy/internal/meitu"
 	"github.com/98624017/meitu-layering-proxy/internal/tasks"
 )
 
 const maxRequestBodyBytes = 1 << 20
 
 type TaskService interface {
-	CreateTask(model string, imageURL string, subjectProtectFlag bool) (*tasks.Task, error)
+	CreateTask(model string, imageURL string, options meitu.LayeringOptions) (*tasks.Task, error)
 	RefreshTask(ctx context.Context, id string) (*tasks.Task, bool)
 }
 
@@ -83,13 +84,13 @@ func (s *Server) handleVideos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	model, imageURL, subjectProtectFlag, err := ValidateCreateRequest(request)
+	model, imageURL, options, err := ValidateCreateRequest(request)
 	if err != nil {
 		WriteError(w, http.StatusBadRequest, CodeInvalidRequest, err.Error())
 		return
 	}
 
-	task, err := s.taskService.CreateTask(model, imageURL, subjectProtectFlag)
+	task, err := s.taskService.CreateTask(model, imageURL, options)
 	if err != nil {
 		if errors.Is(err, tasks.ErrTaskQueueFull) {
 			WriteError(w, http.StatusTooManyRequests, CodeTaskQueueFull, "任务队列已满，请稍后重试")

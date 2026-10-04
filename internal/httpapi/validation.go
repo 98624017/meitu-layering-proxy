@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/98624017/meitu-layering-proxy/internal/meitu"
 )
 
 type hostnameResolver interface {
@@ -15,30 +17,52 @@ type hostnameResolver interface {
 
 var publicURLResolver hostnameResolver = net.DefaultResolver
 
-const supportedModel = "meitu-layering"
+const supportedModel = "layering-v2"
 
-func ValidateCreateRequest(request CreateVideoRequest) (string, string, bool, error) {
+func ValidateCreateRequest(request CreateVideoRequest) (string, string, meitu.LayeringOptions, error) {
+	options := meitu.LayeringOptions{TextEditable: true, OriLang: "ch"}
 	model := strings.TrimSpace(request.Model)
 	if model == "" {
-		return "", "", false, errors.New("model 是必填字段")
+		return "", "", options, errors.New("model 是必填字段")
+	}
+	if model == "meitu-layering" {
+		return "", "", options, errors.New("meitu-layering 已停用，请升级客户端并使用 layering-v2")
 	}
 	if model != supportedModel {
-		return "", "", false, errors.New("model 不支持")
+		return "", "", options, errors.New("model 不支持")
 	}
 
 	image := strings.TrimSpace(request.Image)
+	reference := strings.TrimSpace(request.InputReference)
+	if image != "" && reference != "" && image != reference {
+		return "", "", options, errors.New("image 与 input_reference 不能指定不同图片")
+	}
 	if image == "" {
-		return "", "", false, errors.New("image 是必填字段")
+		image = reference
+	}
+	if image == "" {
+		return "", "", options, errors.New("image 或 input_reference 是必填字段")
 	}
 	if err := validatePublicImageURL(image, publicURLResolver); err != nil {
-		return "", "", false, err
+		return "", "", options, err
 	}
 
-	subjectProtectFlag := false
-	if request.SubjectProtectFlag != nil {
-		subjectProtectFlag = *request.SubjectProtectFlag
+	if request.TextEditable != nil {
+		options.TextEditable = *request.TextEditable
 	}
-	return model, image, subjectProtectFlag, nil
+	if request.SubjectProtectFlag != nil {
+		options.SubjectProtectFlag = *request.SubjectProtectFlag
+	}
+	if request.OriLang != "" {
+		options.OriLang = request.OriLang
+	}
+	options.OnlyTextEliminate = request.OnlyTextEliminate
+	switch options.OriLang {
+	case "ch", "chinese_cht", "en", "japan", "korean":
+	default:
+		return "", "", options, errors.New("ori_lang 仅支持 ch、chinese_cht、en、japan、korean")
+	}
+	return model, image, options, nil
 }
 
 func validatePublicImageURL(raw string, resolver hostnameResolver) error {
