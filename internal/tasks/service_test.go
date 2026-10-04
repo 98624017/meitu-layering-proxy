@@ -28,7 +28,7 @@ func TestServiceQueueTimeoutBeforeUpstream(t *testing.T) {
 	})
 	SetNowForTest(service, func() time.Time { return now })
 
-	task, err := service.CreateTask("meitu-layering", "https://example.com/image.png", false)
+	task, err := service.CreateTask("meitu-layering", "https://example.com/image.png", meitu.LayeringOptions{TextEditable: true, OriLang: "ch"})
 	if err != nil {
 		t.Fatalf("CreateTask error: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestServiceUpstreamLeaseTimeoutReleasesCredential(t *testing.T) {
 	})
 	SetNowForTest(service, func() time.Time { return now })
 
-	task, err := service.CreateTask("meitu-layering", "https://example.com/image.png", false)
+	task, err := service.CreateTask("meitu-layering", "https://example.com/image.png", meitu.LayeringOptions{TextEditable: true, OriLang: "ch"})
 	if err != nil {
 		t.Fatalf("CreateTask error: %v", err)
 	}
@@ -115,16 +115,13 @@ func TestServiceCompletesOnRealtimeGet(t *testing.T) {
 	client := &fakeMeituClient{
 		submitResult: meitu.SubmitResult{UpstreamTaskID: "mt-task", Status: 9},
 		statusResult: meitu.StatusResult{
-			Status:   meitu.UpstreamStatusCompleted,
-			Progress: 1,
-			ProjectJSON: map[string]any{"templateConf": []any{map[string]any{
-				"width":  float64(10),
-				"height": float64(20),
-				"layers": []any{map[string]any{"id": "layer1"}},
-			}}},
-			Width:      10,
-			Height:     20,
-			LayerCount: 1,
+			Status:      meitu.UpstreamStatusCompleted,
+			Progress:    1,
+			ProjectJSON: map[string]any{"width": float64(10), "height": float64(20), "templateConf": []any{map[string]any{"id": "layer1"}}},
+			PSDURL:      "https://example.com/result.psd",
+			Width:       10,
+			Height:      20,
+			LayerCount:  1,
 		},
 	}
 	service := NewService(ServiceOptions{
@@ -138,7 +135,7 @@ func TestServiceCompletesOnRealtimeGet(t *testing.T) {
 	})
 	SetNowForTest(service, func() time.Time { return now })
 
-	task, err := service.CreateTask("meitu-layering", "https://example.com/image.png", true)
+	task, err := service.CreateTask("meitu-layering", "https://example.com/image.png", meitu.LayeringOptions{TextEditable: true, OriLang: "ch", SubjectProtectFlag: true})
 	if err != nil {
 		t.Fatalf("CreateTask error: %v", err)
 	}
@@ -198,7 +195,7 @@ func TestServiceStatusUpstreamErrorExposesUpstreamMessage(t *testing.T) {
 	})
 	SetNowForTest(service, func() time.Time { return now })
 
-	task, err := service.CreateTask("meitu-layering", "https://example.com/image.png", false)
+	task, err := service.CreateTask("meitu-layering", "https://example.com/image.png", meitu.LayeringOptions{TextEditable: true, OriLang: "ch"})
 	if err != nil {
 		t.Fatalf("CreateTask error: %v", err)
 	}
@@ -251,7 +248,7 @@ func TestServiceRetriesCredentialErrors(t *testing.T) {
 	})
 	SetNowForTest(service, func() time.Time { return now })
 
-	task, err := service.CreateTask("meitu-layering", "https://example.com/image.png", false)
+	task, err := service.CreateTask("meitu-layering", "https://example.com/image.png", meitu.LayeringOptions{TextEditable: true, OriLang: "ch"})
 	if err != nil {
 		t.Fatalf("CreateTask error: %v", err)
 	}
@@ -285,10 +282,10 @@ func TestServiceRejectsWhenTaskQueueIsFull(t *testing.T) {
 	})
 	SetNowForTest(service, func() time.Time { return now })
 
-	if _, err := service.CreateTask("meitu-layering", "https://example.com/1.png", false); err != nil {
+	if _, err := service.CreateTask("meitu-layering", "https://example.com/1.png", meitu.LayeringOptions{TextEditable: true, OriLang: "ch"}); err != nil {
 		t.Fatalf("first CreateTask error: %v", err)
 	}
-	if _, err := service.CreateTask("meitu-layering", "https://example.com/2.png", false); !errors.Is(err, ErrTaskQueueFull) {
+	if _, err := service.CreateTask("meitu-layering", "https://example.com/2.png", meitu.LayeringOptions{TextEditable: true, OriLang: "ch"}); !errors.Is(err, ErrTaskQueueFull) {
 		t.Fatalf("second CreateTask error = %v, want ErrTaskQueueFull", err)
 	}
 }

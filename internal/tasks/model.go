@@ -1,6 +1,10 @@
 package tasks
 
-import "time"
+import (
+	"time"
+
+	"github.com/98624017/meitu-layering-proxy/internal/meitu"
+)
 
 const (
 	StatusQueued              = "queued"
@@ -24,7 +28,7 @@ type Task struct {
 	ID                      string
 	Model                   string
 	ImageURL                string
-	SubjectProtectFlag      bool
+	Options                 meitu.LayeringOptions
 	Status                  string
 	Progress                int
 	CreatedAt               time.Time
@@ -39,6 +43,7 @@ type Task struct {
 	UpstreamProgress        float64
 	RequestedUpstream       bool
 	ProjectJSON             map[string]any
+	PSDURL                  string
 	Width                   int
 	Height                  int
 	LayerCount              int

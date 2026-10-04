@@ -63,7 +63,7 @@ func NewService(options ServiceOptions) *Service {
 	}
 }
 
-func (s *Service) CreateTask(model string, imageURL string, subjectProtectFlag bool) (*Task, error) {
+func (s *Service) CreateTask(model string, imageURL string, options meitu.LayeringOptions) (*Task, error) {
 	now := s.now().UTC()
 	id, err := generateTaskID()
 	if err != nil {
@@ -71,14 +71,14 @@ func (s *Service) CreateTask(model string, imageURL string, subjectProtectFlag b
 	}
 
 	task := &Task{
-		ID:                 id,
-		Model:              model,
-		ImageURL:           imageURL,
-		SubjectProtectFlag: subjectProtectFlag,
-		Status:             StatusQueued,
-		Progress:           0,
-		CreatedAt:          now,
-		QueueDeadlineAt:    now.Add(s.queueTimeout),
+		ID:              id,
+		Model:           model,
+		ImageURL:        imageURL,
+		Options:         options,
+		Status:          StatusQueued,
+		Progress:        0,
+		CreatedAt:       now,
+		QueueDeadlineAt: now.Add(s.queueTimeout),
 	}
 	if err := s.store.CreateIfBelowActiveLimit(task, s.maxQueuedTasks); err != nil {
 		return nil, err
@@ -188,8 +188,8 @@ func (s *Service) processQueuedTask(ctx context.Context, id string, now time.Tim
 		}
 
 		result, err := s.client.Submit(ctx, lease.Credential, meitu.SubmitInput{
-			ImageURL:           task.ImageURL,
-			SubjectProtectFlag: task.SubjectProtectFlag,
+			ImageURL: task.ImageURL,
+			Options:  task.Options,
 		})
 		submittedAt := s.now().UTC()
 		if err == nil {
@@ -207,6 +207,9 @@ func (s *Service) processQueuedTask(ctx context.Context, id string, now time.Tim
 				task.UpstreamLeaseDeadlineAt = submittedAt.Add(s.upstreamLeaseTimeout)
 				task.LeasedCredentialName = lease.Credential.Name
 				task.LeasedCredentialID = lease.ID
+				if result.Result != nil {
+					s.applyUpstreamResult(task, *result.Result, submittedAt)
+				}
 				return nil
 			})
 			slog.Info("meitu_task_submitted", "task_id", id, "credential", lease.Credential.Name, "upstream_task_id", result.UpstreamTaskID)
@@ -295,36 +298,38 @@ func (s *Service) pollUpstreamStatus(ctx context.Context, task *Task, now time.T
 		if current.IsTerminal() {
 			return nil
 		}
-		current.UpstreamStatus = intStatus(result.Status)
-		current.UpstreamProgress = result.Progress
-		if result.Failed {
-			s.pool.Release(current.LeasedCredentialID)
-			current.LeasedCredentialName = ""
-			current.LeasedCredentialID = ""
-			message := result.FailureMessage
-			if message == "" {
-				message = "上游任务失败"
-			}
-			if result.FailureCode != "" {
-				current.UpstreamStatus = result.FailureCode
-			}
-			current.MarkFailed(ErrorUpstreamFailed, message, observedAt)
-			return nil
-		}
-		if result.Status == meitu.UpstreamStatusCompleted {
-			s.pool.Release(current.LeasedCredentialID)
-			current.LeasedCredentialName = ""
-			current.LeasedCredentialID = ""
-			current.MarkCompleted(result.ProjectJSON, result.Width, result.Height, result.LayerCount, observedAt)
-			return nil
-		}
-		current.Status = StatusInProgress
-		current.Progress = progressPercent(result.Progress)
+		s.applyUpstreamResult(current, result, observedAt)
 		return nil
 	})
 
 	refreshed, _ := s.store.Get(task.ID)
 	return refreshed
+}
+
+func (s *Service) applyUpstreamResult(task *Task, result meitu.StatusResult, now time.Time) {
+	task.UpstreamStatus = intStatus(result.Status)
+	task.UpstreamProgress = result.Progress
+	if result.Failed || result.Status == meitu.UpstreamStatusCompleted {
+		s.pool.Release(task.LeasedCredentialID)
+		task.LeasedCredentialName = ""
+		task.LeasedCredentialID = ""
+	}
+	if result.Failed {
+		message := result.FailureMessage
+		if message == "" {
+			message = "上游任务失败"
+		}
+		if result.FailureCode != "" {
+			task.UpstreamStatus = result.FailureCode
+		}
+		task.MarkFailed(ErrorUpstreamFailed, message, now)
+	} else if result.Status == meitu.UpstreamStatusCompleted {
+		task.MarkCompleted(result.ProjectJSON, result.Width, result.Height, result.LayerCount, now)
+		task.PSDURL = result.PSDURL
+	} else {
+		task.Status = StatusInProgress
+		task.Progress = progressPercent(result.Progress)
+	}
 }
 
 func (s *Service) failQueueExpiredTask(id string, now time.Time) bool {
